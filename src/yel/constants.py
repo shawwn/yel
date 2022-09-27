@@ -65,13 +65,16 @@ class Seq(list):
         return hash(py.id(self))
 
 def join(x=nil, y=nil):
-    try:
-        return Seq([x, *(y or [])])
-    except TypeError:
-        return Seq([x, ".", y])
+    if not isinstance(y, (str, bytes)):
+        try:
+            return Seq([x, *(y or [])])
+        except TypeError:
+            pass
+    return Seq([x, ".", y])
 
 assert join(nil, nil) == [nil], f"{join(nil, nil)=} != [nil]"
 assert join(1, 2) == [1, ".", 2]
+assert join(1, '"foo"') == [1, ".", '"foo"']
 
 def init(x: T, val: Callable[[], T] = lambda: t) -> T:
     if unset(x):

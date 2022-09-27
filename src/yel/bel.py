@@ -62,6 +62,11 @@ def list(*args):
     # return append(args, nil)
     return Seq(args)
 
+# def map(f, *args):
+#     if some(null, args):
+#         return nil
+#     return py.map(f, *(arg for arg in args if arg))
+
 def some(f, xs):
     for x in xs:
         if f(x):
@@ -140,6 +145,14 @@ assert equal([1, 2], (1, 2), [1, 2])
 assert not equal([1, 2], (1, 2), [1, 2], 3)
 # assert equal([], nil, False)
 
+def mem(x, ys, f=equal):
+    """
+    (def mem (x ys (o f =))
+      (some [f _ x] ys))
+    """
+    # return some(lambda y: f(y, x), ys)
+    return py.any(f(y, x) for y in ys or ())
+
 def begins(xs, pat, f=equal):
     """
     (def begins (xs pat (o f =))
@@ -163,6 +176,15 @@ def caris(x, y, f=equal):
     """
     return begins(x, [y], f)
 
+def keep(f, xs):
+    """
+    (def keep (f xs)
+      (if (no xs)      nil
+          (f (car xs)) (cons (car xs) (keep f (cdr xs)))
+                       (keep f (cdr xs))))
+    """
+    return append(x for x in xs or () if f(x))
+
 def bel(e, g: Dict = unset, a: MutableMapping = unset):
     """
     (def bel (e (o g globe))
@@ -179,12 +201,13 @@ def bel(e, g: Dict = unset, a: MutableMapping = unset):
                 ([], g))
 
 def wait(f, s: List[List], r: List, m: Tuple[List, Dict]):
-    print(f, s, r)
+    # print(f, s, r)
     while it := f(s, r, m):
+        print(r, s)
         f, (s, r, m) = it
-        print(f, s, r)
+        # print(f, s, r)
 
-def mev(s: List[List], r: List, m: Tuple[List, Dict]):
+def mev(s: List[List], r: List, m: Union[Tuple[List, Dict], List[List]]):
     """
     (def mev (s r (p g))
       (if (no s)
@@ -230,6 +253,7 @@ def ev(s: List[List], r: List, m: Tuple[List, Dict]):
         return mev(s, cons(e, r), m)
     if variable(e):
         return vref(e, a, s, r, m)
+    print()
     print("> ", e, s, r)
     if it := get(forms, car(e), eq):
         return cdr(it)(cdr(e), a, s, r, m)
@@ -269,6 +293,8 @@ def lookup(e, a, s, g):
             scope (cons e a)
             globe (cons e g))))
     """
+    if it := binding(e, s):
+        return it
     if it := get(a, e, eq):
         return it
     if it := get(g, e, eq):
@@ -277,6 +303,30 @@ def lookup(e, a, s, g):
         return a
     if eq(e, "globe"):
         return g
+
+def binding(v, s):
+    """
+    (def binding (v s)
+      (get v
+           (map caddr (keep [begins _ (list smark 'bind) id]
+                            (map car s)))
+           id))
+    """
+    pat = [smark, "bind"]
+    for [e, a] in s or ():
+        if begins(e, pat, eq):
+            cell = caddr(e)
+            if caris(cell, v):
+                return cell
+
+def sigerr(msg, s, r, m):
+    """
+    (def sigerr (msg s r m)
+      (aif (binding 'err s)
+           (applyf (cdr it) (list msg) nil s r m)
+           (err 'no-err)))
+    """
+    raise ValueError(msg, s, r)
 
 def string_literal(e, c='"'):
     if e and string(e):
@@ -386,8 +436,14 @@ def get_nil(kvs: None, k, test=equal):
 @get.register(std.Mapping)
 def get_Mapping(kvs: Mapping, k, test=equal):
     if test is eq:
-        if k in kvs:
-            return kvs, ".", kvs[k]
+        try:
+            it = k in kvs
+        except TypeError:
+            # unhashable k
+            pass
+        else:
+            if it:
+                return kvs, ".", kvs[k]
     for key in kvs:
         if test(key, k):
             return kvs, ".", kvs[key]
@@ -465,6 +521,159 @@ def do(es, a, s, r, m):
                    r,
                    m)
 
+@form("quote")
+def quote(es, a, s, r, m):
+    """
+    (form quote ((e) a s r m)
+      (mev s (cons e r) m))
+    """
+    return mev(s, cons(car(es), r), m)
+
+def if_(cond, then, else_):
+    return then if cond else else_
+
+@form("if")
+def if1(es, a, s, r, m):
+    """
+    (form if (es a s r m)
+      (if (no es)
+          (mev s (cons nil r) m)
+          (mev (cons (list (car es) a)
+                     (if (cdr es)
+                         (cons (fu (s r m)
+                                 (if2 (cdr es) a s r m))
+                               s)
+                         s))
+               r
+               m)))
+    """
+    @fut(a, cons("if", es))
+    def if_then_else(s, r, m):
+        return if2(cdr(es), a, s, r, m)
+    return if_(no(es),
+               lambda: mev(s, cons(nil, r), m),
+               lambda: mev(cons(list(car(es), a),
+                                if_(cdr(es),
+                                    lambda: cons(if_then_else, s),
+                                    lambda: s)()),
+                           r,
+                           m))()
+
+def if2(es, a, s, r, m):
+    """
+    (def if2 (es a s r m)
+      (mev (cons (list (if (car r)
+                           (car es)
+                           (cons 'if (cdr es)))
+                       a)
+                 s)
+           (cdr r)
+           m))
+    """
+    return mev(cons(list(if_(car(r),
+                             lambda: car(es),
+                             lambda: cons("if", cdr(es)))(),
+                         a),
+                    s),
+               cdr(r),
+               m)
+
+"""
+(form where ((e (o new)) a s r m)
+  (mev (cons (list e a)
+             (list (list smark 'loc new) nil)
+             s)
+       r
+       m))
+"""
+
+@form("dyn")
+def dyn(es, a, s, r, m):
+    """
+    (form dyn ((v e1 e2) a s r m)
+      (if (variable v)
+          (mev (cons (list e1 a)
+                     (fu (s r m) (dyn2 v e2 a s r m))
+                     s)
+               r
+               m)
+          (sigerr 'cannot-bind s r m)))
+    """
+    # v, e1, e2 = car(es), cadr(es), cons("do", cddr(es))
+    [v, e1, *body] = es
+    e2 = cons("do", body)
+    if variable(v):
+        return mev(cons(list(e1, a),
+                        fut(a)(lambda s, r, m: dyn2(v, e2, a, s, r, m)),
+                        s),
+                   r,
+                   m)
+    else:
+        return sigerr("cannot-bind", s, r, m)
+
+def dyn2(v, e2, a, s, r, m):
+    """
+    (def dyn2 (v e2 a s r m)
+      (mev (cons (list e2 a)
+                 (list (list smark 'bind (cons v (car r)))
+                       nil)
+                 s)
+           (cdr r)
+           m))
+    """
+    return mev(cons(list(e2, a),
+                    list(list(smark, "bind", cons(v, car(r))),
+                         a),
+                    s),
+               cdr(r),
+               m)
+
+"""
+(form after ((e1 e2) a s r m)
+  (mev (cons (list e1 a)
+             (list (list smark 'prot e2) a)
+             s)
+       r
+       m))
+"""
+
+@form("ccc")
+def ccc(es, a, s, r, m):
+    """
+    (form ccc ((f) a s r m)
+      (mev (cons (list (list f (list 'lit 'cont s r))
+                       a)
+                 s)
+           r
+           m))
+    """
+    f = car(es)
+    return mev(cons(list(list(f, list("lit", "cont", s, r)),
+                         a),
+                    s),
+               r,
+               m)
+
+@form("thread")
+def thread(es, a, s, r, m):
+    """
+    (form thread ((e) a s r (p g))
+      (mev s
+           (cons nil r)
+           (list (cons (list (list (list e a))
+                             nil)
+                       p)
+                 g)))
+    """
+    e = cons("do", es)
+    p, g = car(m), cadr(m)
+    return mev(s,
+               cons(nil, r),
+               list(cons(list(list(list(e, a)),
+                              nil),
+                         p),
+                    g))
+
 def evcall(e, a, s, r, m):
     """
     (def evcall (e a s r m)
@@ -505,16 +714,29 @@ def evcall2(es, a, s, r, m):
         args, r2 = snap(es, r)
         return applyf(op, rev(args), a, s, r2, m)
 
-    return mev(append(map(lambda x: list(x, a), es),
+    return mev(append(map(lambda x: list(x, a), es or []),
                       cons(applying, s)),
                r,
                m)
 
 def snap(es, r):
-    n = len(es)
+    """
+    (def snap (xs ys (o acc))
+      (if (no xs)
+          (list acc ys)
+          (snap (cdr xs) (cdr ys) (snoc acc (car ys)))))
+    """
+    n = len(es or [])
+    r = r or []
     return r[:n], r[n:]
 
 def rev(es):
+    """
+    (def rev (xs)
+      (if (no xs)
+          nil
+          (snoc (rev (cdr xs)) (car xs))))
+    """
     return es[::-1] if es else nil
 
 
@@ -544,29 +766,74 @@ def applyf(f, args, a, s, r, m):
     if callable(f):
         e = f(*args)
         return mev(s, cons(e, r), m)
-    return sigerr("cannot-apply", s, r, m)
+    if caris(f, "lit"):
+        return applylit(f, args, a, s, r, m)
+    return sigerr(list("cannot-apply", cons(f, args)), s, r, m)
 
-"""
-(def applylit (f args a s r m)
-  (aif (and (inwhere s) (find [(car _) f] locfns))
-       ((cadr it) f args a s r m)
-       (let (tag . rest) (cdr f)
-         (case tag
-           prim (applyprim (car rest) args s r m)
-           clo  (let ((o env) (o parms) (o body) . extra) rest
-                  (if (and (okenv env) (okparms parms))
-                      (applyclo parms args env body s r m)
-                      (sigerr 'bad-clo s r m)))
-           mac  (applym f (map [list 'quote _] args) a s r m)
-           cont (let ((o s2) (o r2) . extra) rest
-                  (if (and (okstack s2) (proper r2))
-                      (applycont s2 r2 args s r m)
-                      (sigerr 'bad-cont s r m)))
-                (aif (get tag virfns)
-                     (let e ((cdr it) f (map [list 'quote _] args))
-                       (mev (cons (list e a) s) r m))
-                     (sigerr 'unapplyable s r m))))))
-"""
+def applylit(f, args, a, s, r, m):
+    """
+    (def applylit (f args a s r m)
+      (aif (and (inwhere s) (find [(car _) f] locfns))
+           ((cadr it) f args a s r m)
+           (let (tag . rest) (cdr f)
+             (case tag
+               prim (applyprim (car rest) args s r m)
+               clo  (let ((o env) (o parms) (o body) . extra) rest
+                      (if (and (okenv env) (okparms parms))
+                          (applyclo parms args env body s r m)
+                          (sigerr 'bad-clo s r m)))
+               mac  (applym f (map [list 'quote _] args) a s r m)
+               cont (let ((o s2) (o r2) . extra) rest
+                      (if (and (okstack s2) (proper r2))
+                          (applycont s2 r2 args s r m)
+                          (sigerr 'bad-cont s r m)))
+                    (aif (get tag virfns)
+                         (let e ((cdr it) f (map [list 'quote _] args))
+                           (mev (cons (list e a) s) r m))
+                         (sigerr 'unapplyable s r m))))))
+    """
+    lit = cdr(f)
+    tag = car(lit)
+    rest = cdr(lit)
+    if eq(tag, "cont"):
+        s2, r2 = car(rest), cadr(rest)
+        return applycont(s2, r2, args, s, r, m)
+    return sigerr(list("unapplyable", cons(f, args)))
+
+def applycont(s2, r2, args, s, r, m):
+    """
+    (def applycont (s2 r2 args s r m)
+      (if (or (no args) (cdr args))
+          (sigerr 'wrong-no-args s r m)
+          (mev (append (keep [and (protected _) (no (mem _ s2 id))]
+                             s)
+                       s2)
+               (cons (car args) r2)
+               m)))
+    """
+    if no(args) or cdr(args):
+        return sigerr(list("wrong-no-args", args), s, r, m)
+    # return mev(s2,
+    #            cons(car(args), r2),
+    #            m)
+    return mev(append(keep(lambda x: protected(x) and not mem(x, s2, eq),
+                           s),
+                      s2),
+               cons(car(args), r2),
+               m)
+
+def protected(x):
+    """
+    (def protected (x)
+      (some [begins (car x) (list smark _) id]
+            '(bind prot)))
+    """
+    for tag in ["bind", "prot"]:
+        if begins(car(x), list(smark, tag), eq):
+            return t
+
+
+
 
 # import yel.bel as b; from importlib import reload; reload(b)
 # x = 2
