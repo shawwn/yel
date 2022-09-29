@@ -592,7 +592,7 @@ def dyn(es, a, s, r, m):
                    r,
                    m)
     else:
-        return sigerr("cannot-bind", s, r, m)
+        return sigerr(list("cannot-bind", v, e1), s, r, m)
 
 def dyn2(v, e2, a, s, r, m):
     """
