@@ -253,7 +253,7 @@ def ev(s: List[List], r: List, m: Tuple[List, Dict]):
     # print()
     # print("> ", e, s, r)
     if it := get(forms, car(e), eq):
-        return cdr(it)(cdr(e), a, s, r, m)
+        return cadr(it)(cdr(e), a, s, r, m)
     if callable(car(e)):
         return evcall2(cdr(e), a, s, cons(car(e), r), m)
     return evcall(e, a, s, r, m)
@@ -276,7 +276,7 @@ def vref(v, a, s, r, m):
     """
     g = cadr(m)
     if it := lookup(v, a, s, g):
-        return mev(s, cons(cdr(it), r), m)
+        return mev(s, cons(cadr(it), r), m)
     else:
         return sigerr(list("unboundb", v), s, r, m)
 
@@ -426,10 +426,10 @@ def get_Mapping(kvs: Mapping, k, test=equal):
             pass
         else:
             if it:
-                return kvs, ".", kvs[k]
+                return kvs, kvs[k]
     for key in kvs:
         if test(key, k):
-            return kvs, ".", kvs[key]
+            return kvs, kvs[key]
 
 @get.register(py.tuple)
 @get.register(py.list)
