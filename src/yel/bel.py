@@ -614,6 +614,29 @@ def dyn2(v, e2, a, s, r, m):
                cdr(r),
                m)
 
+@form("let")
+def let1(es, a, s, r, m):
+    [v, e1, *body] = es
+    e2 = cons("do", body)
+    if variable(v):
+        @fut(a, cons("let", es))
+        def let(s, r, m):
+            return let2(v, e2, a, s, r, m)
+        return mev(cons(list(e1, a),
+                        let,
+                        s),
+                   r,
+                   m)
+    else:
+        return sigerr(list("cannot-let", v, e1), s, r, m)
+
+def let2(v, e2, a, s, r, m):
+    env = cons({v: car(r)}, a)
+    return mev(cons(list(e2, env),
+                    s),
+               cdr(r),
+               m)
+
 """
 (form after ((e1 e2) a s r m)
   (mev (cons (list e1 a)
