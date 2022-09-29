@@ -120,6 +120,13 @@ assert atom(False)
 assert atom("x")
 
 def equal(*args):
+    """
+    (def = args
+      (if (no (cdr args))  t
+          (some atom args) (all [id _ (car args)] (cdr args))
+                           (and (apply = (map car args))
+                                (apply = (map cdr args)))))
+    """
     if some(atom, args):
         y, xs = car(args), cdr(args)
         if all(lambda x: eq(x, y), xs):
