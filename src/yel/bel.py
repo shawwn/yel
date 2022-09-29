@@ -183,27 +183,29 @@ def keep(f, xs):
     """
     return append(x for x in xs or () if f(x))
 
-def bel(e, g: Dict = unset, a: MutableMapping = unset):
+def bel(e, g: List[Dict] = unset, a: List[MutableMapping] = unset):
     """
     (def bel (e (o g globe))
       (ev (list (list e nil))
           nil
           (list nil g)))
     """
-    g = init(g, lambda: {})
-    a = init(a, lambda: {})
-    g.setdefault("__builtins__", py)
-    g = [g, globals(), py.__dict__]
-    return ev, ([[e, a]],
-                [],
-                ([], g))
+    g = [init(g, lambda: [globals(), py.__dict__])]
+    a = [init(a, lambda: [])]
+    return tev(ev,
+               [[e, a]],
+               [],
+               [[], g])
 
-def wait(f, s: List[List], r: List, m: Tuple[List, Dict]):
-    # print(f, s, r)
+def tev(f, s: List[List], r: List, m: Tuple[List, Dict]):
     while it := f(s, r, m):
-        print(r, s)
+        if f == fin:
+            return it
         f, (s, r, m) = it
-        # print(f, s, r)
+
+def fin(s, r, m):
+    assert len(r) == 1
+    return car(r)
 
 def mev(s: List[List], r: List, m: Union[Tuple[List, Dict], List[List]]):
     """
@@ -225,9 +227,6 @@ def mev(s: List[List], r: List, m: Union[Tuple[List, Dict], List[List]]):
             return fin, (s, r, m)
     else:
         return sched(snoc(p, [s, r]), g)
-
-def fin(s, r, m):
-    print('fin', s, r)
 
 def sched(p: List, g: Dict):
     """
@@ -251,8 +250,8 @@ def ev(s: List[List], r: List, m: Tuple[List, Dict]):
         return mev(s, cons(e, r), m)
     if variable(e):
         return vref(e, a, s, r, m)
-    print()
-    print("> ", e, s, r)
+    # print()
+    # print("> ", e, s, r)
     if it := get(forms, car(e), eq):
         return cdr(it)(cdr(e), a, s, r, m)
     if callable(car(e)):
@@ -298,9 +297,9 @@ def lookup(e, a, s, g):
     if it := get(g, e, eq):
         return it
     if eq(e, "scope"):
-        return a
+        return list(a, a)
     if eq(e, "globe"):
-        return g
+        return list(g, g)
 
 def binding(v, s):
     """
