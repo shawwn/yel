@@ -106,15 +106,6 @@ assert not pair("x")
 def atom(x):
     if not pair(x):
         return t
-    # if yes(x) and not string(x):
-    #     try:
-    #         # for _ in x:
-    #         #     break
-    #         cdr(x)
-    #         return nil
-    #     except TypeError:
-    #         pass
-    # return t
 
 assert atom(())
 assert atom([])
