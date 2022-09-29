@@ -344,20 +344,6 @@ def literal(e):
           (caris e 'lit)
           (string e)))
     """
-    # if e in [t, nil, False]:
-    #     return t
-    # if string(e):
-    #     if string_literal(e):
-    #         return t
-    #     if id_literal(e):
-    #         return t
-    #     return nil
-    # if caris(e, "lit"):
-    #     return t
-    # if callable(e):
-    #     return nil
-    # return nil
-    # def literal(e):
     if e in [t, nil, False, apply, unset]:
         return t
     # elif in_(type(e), quote("char"), quote("stream")):
@@ -502,7 +488,7 @@ def form(e):
 
 forms = globals().setdefault("forms", {})
 
-form(smark)(evmark)
+forms[smark] = evmark
 
 @fut(nil)
 def discard(s, r, m):
