@@ -586,8 +586,11 @@ def dyn(es, a, s, r, m):
     [v, e1, *body] = es
     e2 = cons("do", body)
     if variable(v):
+        @fut(a, cons("dyn", es))
+        def let(s, r, m):
+            return dyn2(v, e2, a, s, r, m)
         return mev(cons(list(e1, a),
-                        fut(a)(lambda s, r, m: dyn2(v, e2, a, s, r, m)),
+                        dyn,
                         s),
                    r,
                    m)
