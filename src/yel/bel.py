@@ -749,19 +749,33 @@ def rev(es):
     return es[::-1] if es else nil
 
 
-"""
-(def applym (mac args a s r m)
-  (applyf (caddr mac)
-          args
-          a
-          (cons (fu (s r m)
-                  (mev (cons (list (car r) a) s)
-                       (cdr r)
-                       m))
-                s)
-          r
-          m))
-"""
+def applym(mac, args, a, s, r, m):
+    """
+    (def applym (mac args a s r m)
+      (applyf (caddr mac)
+              args
+              a
+              (cons (fu (s r m)
+                      (mev (cons (list (car r) a) s)
+                           (cdr r)
+                           m))
+                    s)
+              r
+              m))
+    """
+    @fut(a, cons(caddr(mac), args))
+    def expanding(s, r, m):
+        return mev(cons(list(car(r), a), s),
+                   cdr(r),
+                   m)
+
+    return applyf(caddr(mac),
+                  args,
+                  a,
+                  cons(expanding,
+                       s),
+                  r,
+                  m)
 
 def applyf(f, args, a, s, r, m):
     """
@@ -802,8 +816,10 @@ def applylit(f, args, a, s, r, m):
                          (sigerr 'unapplyable s r m))))))
     """
     lit = cdr(f)
-    tag = car(lit)
-    rest = cdr(lit)
+    tag, rest = car(lit), cdr(lit)
+    if eq(tag, "mac"):
+        # return applym(f, [list("quote", x) for x in args or ()], a, s, r, m)
+        return applym(f, args or (), a, s, r, m)
     if eq(tag, "cont"):
         s2, r2 = car(rest), cadr(rest)
         return applycont(s2, r2, args, s, r, m)
@@ -840,7 +856,6 @@ def protected(x):
     for tag in ["bind", "prot"]:
         if begins(car(x), list(smark, tag), eq):
             return t
-
 
 
 
