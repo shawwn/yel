@@ -68,12 +68,12 @@ def list(*args):
 #     return py.map(f, *(arg for arg in args if arg))
 
 def some(f, xs):
-    for x in xs:
+    for x in xs or ():
         if f(x):
             return xs
 
 def all(f, xs):
-    for x in xs:
+    for x in xs or ():
         if not f(x):
             return nil
     return xs
