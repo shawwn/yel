@@ -2,17 +2,21 @@ import unittest
 
 from yel import bel
 
+def do(local, e):
+    g = bel.bel("globe")
+    return bel.bel(e, g, [local])
+
 class TestCase(unittest.TestCase):
-    def test_basic(self):
-        self.assertEqual(1, 1)
     def test_bel(self):
         test = self.assertEqual
-        test(1, bel.bel(1))
-        test(1, bel.bel(["let", "x", 1, "x"]))
+        test(1, do(locals(), 1))
+        test(1, do(locals(), ["let", "x", 1, "x"]))
         x = 1
-        test(1, bel.bel("x", bel.bel("globe"), [locals()]))
-        test(1, bel.bel([["lit", "mac", lambda: ["do", 1]]]))
-        test([1], bel.bel([["lit", "mac", lambda x: x], ["quote", ["list", 1]]]))
+        test(1, do(locals(), "x"))
+        test(1, do(locals(), [["lit", "mac", lambda: ["do", "x"]]]))
+        test([1], do(locals(), [["lit", "mac", lambda e: e], ["list", 1]]))
+        f = ["lit", "mac", lambda e: e]
+        test([1], do(locals(), ["f", ["list", 1]]))
 
 if __name__ == '__main__':
     unittest.main()

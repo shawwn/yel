@@ -10,10 +10,10 @@ class EndOfFile(ReaderError):
     pass
 
 def delimiter_p(c):
-    return c and c in "\"()[]{};\r\n"
+    return c and c in "\"()[]{},;\r\n"
 
 def elisp_delimiter_p(c):
-    return c and c in "\"()[];\r\n"
+    return c and c in "\"()[],;\r\n"
 
 def delimiter_fn(s):
     if stream_mode(s) == 'elisp':
@@ -97,7 +97,44 @@ def read_from_string(string, start=0, end=None, more=None, mode=None):
     s = stream(string, start=start, end=end, more=more, mode=mode)
     return read(s), stream_pos(s)
 
+# (define read (s)
+#   (let form (read-1 s)
+#     (if (= "," (peek-char s))
+#         (with r (list "," form)
+#           (while true
+#             (read-char s)
+#             (set form (read-1 s))
+#             (if (eof? s form) (return (expected s "tuple")))
+#             (add r form)
+#             (unless (= "," (peek-char s))
+#               (break))))
+#       form)))
 def read(s, eof=None, start=None):
+    form = read1(s, eof=eof, start=start)
+    c = peek_char(s)
+    if c == ":":
+        read_char(s)
+        return wrap(s, "%colon", form, start=start)
+    if c and c in "([{.":
+        e = wrap(s, "%snake", form, start=start)
+        # print(e)
+        return e
+    if c == ",":
+        eos = object()
+        r = ["%tuple", form]
+        while True:
+            read_char(s)
+            form = read1(s, eof=eos, start=start, form=r)
+            if form is eos:
+                return expected(s, "tuple", start)
+            if form is not None:
+                r.append(form)
+            if peek_char(s) != ",":
+                break
+        return r
+    return form
+
+def read1(s, eof=None, start=None, form=None):
     skip_non_code(s)
     if start is None:
         start = stream_pos(s)
@@ -105,16 +142,22 @@ def read(s, eof=None, start=None):
     if c is None:
         return eof
     elif c == "(":
-        return read_list(s, "(", ")", start=start)
+        form = read_list(s, "(", ")", start=start)
+        if form == stream_more(s):
+            return form
+        # if len(form) == 1 and form[0] and isinstance(form[0], list) and form[0][0] in ["%tuple", "%colon"]:
+        if len(form) == 1 and form[0] and isinstance(form[0], list) and form[0][0] in ["%tuple"]:
+            return form[0]
+        return form
     elif c == "[":
         form = read_list(s, "[", "]", start=start)
         if form == stream_more(s):
             return form
         # if stream_mode(s) in ["bel", "arc"]:
         #     return ["fn", ["_"], form]
-        return ["%brackets", form]
+        return ["%brackets", *form]
     elif c == "{" and stream_mode(s) != "elisp":
-        return ["%braces", read_list(s, "{", "}", start=start)]
+        return ["%braces", *read_list(s, "{", "}", start=start)]
     elif c == '"':
         if peek_char(s, 3) == '"""':
             form = read_string(s, '"""', '"""', backquote=True)
@@ -150,6 +193,9 @@ def read(s, eof=None, start=None):
             return wrap(s, "unquote-splicing", start=start)
         return wrap(s, "unquote", start=start)
     elif closing_fn(s)(c):
+        if form:
+            # read_char(s)
+            return
         raise SyntaxError(f"Unexpected {peek_char(s)!r} at {format_line_info(s, stream_pos(s))} from {format_line_info(s, start)}")
     return read_atom(s)
 
@@ -205,6 +251,8 @@ def read_list(s, open: str, close: str, start=None):
     if c != close:
         return expected(s, close, start)
     assert read_char(s) == close
+    # if len(out) == 1 and isinstance(out[0], list) and out[0] and out[0][0] == "%tuple":
+    #     return out[0]
     return out
 
 def read_atom(s, *, backquote: Optional[bool] = None):
@@ -226,7 +274,11 @@ def read_atom(s, *, backquote: Optional[bool] = None):
         out.append(read_char(s) or expected(s, "character", start))
     if (more := stream_more(s)) in out:
         return more
-    return "".join(out)
+    form = "".join(out)
+    if form.endswith(":") and form != ":":
+        stream_pos(s, stream_pos(s) - 1)
+        return form[:-1]
+    return form
 
 def read_string(s, open: str, close: str, *, backquote: Optional[bool] = None):
     start = stream_pos(s)
@@ -247,11 +299,13 @@ def read_string(s, open: str, close: str, *, backquote: Optional[bool] = None):
     return open + "".join(out) + close
 
 
-def wrap(s, x, start=None):
+def wrap(s, x, *rest, start=None):
     if (y := read(s, start=start)) == stream_more(s):
         return y
     else:
-        return [x, y]
+        if x == "%snake" and y and isinstance(y, list) and y[0] == "%snake":
+            return [x, *rest, *y[1:]]
+        return [x, *rest, y]
 
 
 

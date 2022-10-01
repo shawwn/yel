@@ -4,11 +4,23 @@ import collections.abc as std
 import builtins as py
 import contextlib
 import itertools
+import functools
+import ast
+import inspect
+import types
+import os
+from importlib import reload
 
 from .constants import *
+from . import reader
+from . import compiler
+from . import util
+
+import sys
+M = sys.modules[__name__]
 
 def apply(f, args=nil, kws: Mapping = nil):
-    return f(*(args or []), **(kws or {}))
+    return f(*(args or ()), **(kws or {}))
 
 def cadr(x):
     return car(cdr(x))
@@ -34,6 +46,19 @@ def no(x):
 def yes(x):
     if not no(x):
         return t
+
+def idfn(x):
+    return x
+
+def map(f, *args):
+    return py.list(py.map(f, *(l or () for l in args)))
+
+def mapcat(f, *args, sep=""):
+    r = []
+    for x in map(f or idfn, *args):
+        if ok(x):
+            r.append(py.str(x))
+    return sep.join(r)
 
 def reduce(f, xs):
     a, bs = car(xs), cdr(xs)
@@ -76,19 +101,10 @@ def all(f, xs):
     for x in xs or ():
         if not f(x):
             return nil
-    return xs
-
-def string(e):
-    if isinstance(e, str):
-        return t
-
-def number(e):
-    if isinstance(e, numbers.Number):
-        if not isinstance(e, bool):
-            return t
+    return t
 
 def pair(x):
-    if x and isinstance(x, (py.list, py.tuple)):
+    if x and sequence(x):
         return t
 
 assert not pair(())
@@ -183,7 +199,7 @@ def keep(f, xs):
     """
     return append(x for x in xs or () if f(x))
 
-def bel(e, g: List[Dict] = unset, a: List[MutableMapping] = unset):
+def bel(e, g: List[Dict] = unset, a: List[MutableMapping] = unset, p: List[Tuple[List, Dict]] = unset):
     """
     (def bel (e (o g globe))
       (ev (list (list e nil))
@@ -192,13 +208,15 @@ def bel(e, g: List[Dict] = unset, a: List[MutableMapping] = unset):
     """
     g = [init(g, lambda: [globals(), py.__dict__])]
     a = [init(a, lambda: [])]
+    p = init(p, lambda: [])
     return tev(ev,
                [[e, a]],
                [],
-               [[], g])
+               [p, g])
 
 def tev(f, s: List[List], r: List, m: Tuple[List, Dict]):
-    while it := f(s, r, m):
+    while True:
+        it = f(s, r, m)
         if f == fin:
             return it
         f, (s, r, m) = it
@@ -226,7 +244,10 @@ def mev(s: List[List], r: List, m: Union[Tuple[List, Dict], List[List]]):
         else:
             return fin, (s, r, m)
     else:
-        return sched(snoc(p, [s, r]), g)
+        return sched(if_(yes(binding("lock", s)),
+                         lambda: cons([s, r], p),
+                         lambda: snoc(p, [s, r]))(),
+                     g)
 
 def sched(p: List, g: Dict):
     """
@@ -247,16 +268,323 @@ def ev(s: List[List], r: List, m: Tuple[List, Dict]):
     """
     [e, a], s = car(s), cdr(s)
     if literal(e):
-        return mev(s, cons(e, r), m)
+        return evliteral(e, a, s, r, m)
     if variable(e):
         return vref(e, a, s, r, m)
+    e = transform(e)
     # print()
-    # print("> ", e, s, r)
-    if it := get(forms, car(e), eq):
-        return cadr(it)(cdr(e), a, s, r, m)
+    # print("> ", e, dict(s=s, r=r, a=a))
+    if not unset(it := get(forms, car(e), eq)):
+        return it(cdr(e), a, s, r, m)
     if callable(car(e)):
         return evcall2(cdr(e), a, s, cons(car(e), r), m)
     return evcall(e, a, s, r, m)
+
+def method_call(form):
+    if pair(form) and accessor(car(form)):
+        return t
+
+def transform(e):
+    if method_call(it := cadr(e)):
+        x = cons(list("grab", car(e), car(it)), cdr(it))
+    elif accessor(cadr(e)):
+        x = list("grab", car(e), cadr(e))
+    else:
+        return e
+    if cddr(e):
+        return transform(cons(x, cddr(e)))
+    return x
+
+class Bindings(py.dict):
+    def __init__(self, a, s, r, m, scope=t, globe=t, bindings=t):
+        super().__init__()
+        self.frame = [a, s, r, m]
+        self._scope = scope
+        self._globe = globe
+        self._bindings = bindings
+
+    def copy(self):
+        return type(self)(*self.frame, scope=self._scope, globe=self._globe, bindings=self._bindings)
+
+    @property
+    def scope(self):
+        if self._scope:
+            a, s, r, m = self.frame
+            return a
+    @property
+    def globe(self):
+        if self._globe:
+            a, s, r, m = self.frame
+            p, g = car(m), cadr(m)
+            return g
+    @property
+    def stack(self):
+        if self._bindings:
+            a, s, r, m = self.frame
+            return s
+    def bindings(self, stack=unset) -> List[std.Mapping]:
+        if stack is unset:
+            stack = self.stack
+        l = {car(cell): cadr(cell) for cell in bindings(stack)}
+        return [l] if l else []
+    def locals(self, a=unset, acc=unset, setting=nil) -> List[std.Mapping]:
+        if a is unset:
+            a = self.scope
+        if acc is unset:
+            acc = []
+        if sequence(a):
+            for x in a:
+                self.locals(x, acc, setting=setting)
+        elif isinstance(a, std.Mapping):
+            if setting and a in [M.__dict__, py.__dict__]:
+                pass
+            else:
+                acc.append(a)
+        return acc
+    def globals(self, a=unset, acc=unset, setting=nil) -> List[std.Mapping]:
+        return self.locals(self.globe, acc, setting=setting)
+    def frames(self, setting=nil) -> List[std.Mapping]:
+        if setting:
+            return self.globals(setting=setting) + self.locals(setting=setting)
+        else:
+            return [dict(scope=self.scope, globe=self.globe)] + self.globals() + self.locals() + self.bindings()
+    def seq(self, setting=nil):
+        l = {}
+        for kvs in reversed(self.frames(setting=setting)):
+            for k, v in kvs.items():
+                if not unset(v):
+                    l[k] = v
+            # l.update(kvs)
+        return l
+    def keys(self):
+        return py.list(self.seq().keys())
+    def values(self):
+        return py.list(self.seq().values())
+    def items(self):
+        return py.list(self.seq().items())
+    def __len__(self):
+        return py.len(self.seq())
+    def __iter__(self):
+        return py.iter(self.seq())
+    def __repr__(self):
+        l = self.seq()
+        if l.get("__builtins__") is py:
+            l.pop("__builtins__")
+        return py.repr(l)
+
+    def get(self, key, *default):
+        try:
+            return self[key]
+        except KeyError:
+            if default:
+                return default[0]
+            else:
+                return nil
+
+    def pop(self, __key: KT) -> VT:
+        raise NotImplementedError("pop")
+
+    def popitem(self) -> tuple[KT, VT]:
+        raise NotImplementedError("popitem")
+
+    def setdefault(self, __key: KT, __default: VT = ...) -> VT:
+        raise NotImplementedError("setdefault")
+
+    def update(self, __m: Mapping[KT, VT], **kwargs: VT) -> None:
+        raise NotImplementedError("update")
+
+    def clear(self) -> None:
+        raise NotImplementedError("clear")
+
+    def __contains__(self, item):
+        try:
+            self[item]
+            return True
+        except KeyError:
+            return False
+
+    def __getitem__(self, e):
+        # print("Bindings.__getitem__", e)
+        if not unset(it := lookup(e, *self.frame)):
+            return it
+        if eq(e, "unset"):
+            return unset
+        raise KeyError(e)
+    # def __getattr__(self, item):
+    #     try:
+    #         return self[item]
+    #     except KeyError:
+    #         raise AttributeError(item)
+    def __setitem__(self, e, v):
+        print("Bindings.__setitem__", e, v)
+        if not unset(it := lookup(e, *self.frame, setter=t)):
+            return it(v)
+        if not unset(g := lookup("scope", *self.frame)):
+            while sequence(g):
+                g = at(g, -1)
+            if isinstance(g, std.MutableMapping):
+                g[e] = v
+                return
+        raise KeyError(e)
+    # def __setattr__(self, e, v):
+    #     try:
+    #         self[e] = v
+    #     except KeyError:
+    #         raise AttributeError(e)
+    def __hash__(self):
+        return hash(py.id(self))
+
+def getenv(a, s, r, m):
+    p, g = car(m), cadr(m)
+    locals_ = Bindings(a, s, r, [p, [a, g]])
+    globals_ = Bindings(nil, s, r, [p, [a, g]])
+    return globals_, locals_
+
+def evcode(code, a, s, r, m, *, filename="<unknown>", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT):
+    try:
+        co = py.compile(code, filename, "eval", flags=flags)
+        ex = py.eval
+    except SyntaxError:
+        co = py.compile(code, filename, "exec", flags=flags)
+        ex = py.exec
+    globals_, locals_ = getenv(a, s, r, m)
+    e = ex(co, globals_, locals_)
+    return e
+
+def evliteral(e, a, s, r, m):
+    def evlit(e):
+        if id_literal(e):
+            code = e[1:-1] if string(e) else mapcat(evlit, cdr(e))
+            e = evcode(code, a, s, r, m)
+            # try:
+            #     co = py.compile(code, "<unknown>", "eval")
+            #     ex = py.eval
+            # except SyntaxError:
+            #     co = py.compile(code, "<unknown>", "exec")
+            #     ex = py.exec
+            # # globals_ = Bindings(nil, s, r, m)
+            # # locals_ = Bindings(a, nil, nil, [car(m), nil])
+            # globals_, locals_ = getenv(a, s, r, m)
+            # e = ex(code, globals_, locals_)
+            # # try:
+            # #     g = py.dict(__builtins__=env)
+            # #     e = ex(code, g, env)
+            # # except SystemError:
+            # #     g = py.dict(__builtins__=py.dict(__import__=py.__import__))
+            # #     e = ex(code, g, env)
+        elif string_literal(e) or numeric_literal(e):
+            e = ast.literal_eval(e)
+        return e
+    e = evlit(e)
+    # print("evliteral", e)
+    return mev(s, cons(e, r), m)
+
+class Macro(Seq):
+    def __init__(self, f):
+        super().__init__(["lit", "mac", f])
+    def __call__(self, *args, **kwargs):
+        return caddr(self)(*args, **kwargs)
+
+def bind(lh, rh, *body, **kws):
+    if no(lh):
+        return [["do", *body]]
+    # if keyword(lh):
+    #     k = keyword_name(lh)
+    #     return ["let", kws.pop(k),
+    if atom(lh):
+        return [["let", lh, rh, *body]]
+    rest = bind(cdr(lh), cdr(rh), *body, **kws)
+    return bind(car(lh), car(rh), *rest, **kws)
+
+def proper(x):
+    if no(x):
+        return t
+    if pair(x):
+        if not (len(x) >= 3 and x[-2] == "."):
+            return t
+    return nil
+
+def mkproper(l, tail=snoc):
+    if proper(l):
+        return l
+    elif pair(l):
+        return tail(l[:-2], l[-1])
+    else:
+        return tail([], l)
+
+def mkparms(x):
+    if atom(x):
+        return x
+
+
+
+
+class Function(Seq):
+    def __init__(self, scope, globe, parms, body):
+        super().__init__(["lit", "clo", [scope, globe], parms, body])
+
+    @property
+    def env(self):
+        return self[2]
+
+    @property
+    def parms(self):
+        return self[3]
+
+    @property
+    def body(self):
+        return self[4]
+
+    def compile(self):
+        inits = []
+        rest = []
+        names = {}
+        def compile_arg(x):
+            if caris(x, "o"):
+                name = cadr(x)
+                form = caddr(x) or "nil"
+                inits.append([name, form])
+                return compile_arg(name) + "=unset"
+            if string(x):
+                if x.startswith("*"):
+                    return "*" + (compile_arg(x[1:]) or "")
+                if x == "/":
+                    return x
+            if x:
+                v = compiler.compile_id(x)
+                names[v] = x
+                return v
+        return "lambda " + mapcat(compile_arg, self.parms, sep=", ") + ": locals()"
+
+    @property
+    @functools.lru_cache(maxsize=None)
+    def func(self):
+        return py.eval(self.compile(), {}, {})
+
+    @property
+    def __signature__(self):
+        return inspect.signature(self.func)
+
+    def bind(self, args, kws):
+        return self.func(*(args or ()), **(kws or {}))
+
+    def __call__(self, *args, **kwargs):
+        scope, globe = self.env
+        scope = cons(self.bind(args, kwargs), scope)
+        return bel(self.body, globe, scope)
+
+    def __repr__(self):
+        rest = cddr(self)
+        scope, globe = car(rest)
+        return repr(list("lit", "clo", scope, self.parms, self.body))
+
+@Macro
+def when(x, *body):
+    return ["if", x, ["do", *body]]
+
+@Macro
+def fn(parms, *body):
+    return ["Function", "scope", "globe", ["quote", parms], ["quote", ["do", *body]]]
 
 def vref(v, a, s, r, m):
     """
@@ -274,13 +602,14 @@ def vref(v, a, s, r, m):
                  (mev s (cons (cdr it) r) m)
                  (sigerr (list 'unboundb v) s r m)))))
     """
-    g = cadr(m)
-    if it := lookup(v, a, s, g):
-        return mev(s, cons(cadr(it), r), m)
+    if not unset(it := lookup(v, a, s, r, m)):
+        return mev(s, cons(it, r), m)
+    elif eq(v, "unset"):
+        return mev(s, cons(unset, r), m)
     else:
         return sigerr(list("unboundb", v), s, r, m)
 
-def lookup(e, a, s, g):
+def lookup(e, a, s, r, m, *, setter=nil):
     """
     (def lookup (e a s g)
       (or (binding e s)
@@ -290,18 +619,23 @@ def lookup(e, a, s, g):
             scope (cons e a)
             globe (cons e g))))
     """
-    if it := binding(e, s):
+    if not unset(it := binding(e, s, setter=setter)):
         return it
-    if it := get(a, e, eq):
+    if not unset(it := get(a, e, eq, setter=setter)):
         return it
-    if it := get(g, e, eq):
+    g = cadr(m)
+    if not unset(it := get(g, e, eq, setter=setter)):
         return it
-    if eq(e, "scope"):
-        return list(a, a)
-    if eq(e, "globe"):
-        return list(g, g)
+    if not setter:
+        if eq(e, "scope"):
+            return a
+        if eq(e, "globe"):
+            return g
+        if eq(e, "frame"):
+            return list(s, r, m)
+    return unset
 
-def binding(v, s):
+def binding(v, s, *, setter=nil):
     """
     (def binding (v s)
       (get v
@@ -309,12 +643,37 @@ def binding(v, s):
                             (map car s)))
            id))
     """
-    pat = [smark, "bind"]
-    for [e, a] in s or ():
-        if begins(e, pat, eq):
-            cell = caddr(e)
-            if caris(cell, v):
-                return cell
+    # if s:
+    #     pat = [smark, "bind"]
+    #     for [e, a] in s[-1:]:
+    #         if begins(e, pat, eq):
+    #             for [e, a] in s[:-1]:
+    #                 if begins(e, pat, eq):
+    #                     cell = caddr(e)
+    #                     if caris(cell, v):
+    #                         if setter:
+    #                             return lambda v: operator.setitem(cell, 1, v)
+    #                         return cadr(cell)
+    # return unset
+    for cell in bindings(s):
+        if not unset(it := get(cell, v, eq, setter=setter)):
+            return it
+    return unset
+
+
+def bindings(s) -> Generator[Dict]:
+    if s:
+        pat = [smark, "bind"]
+        for [e, a] in s[-1:]:
+            if begins(e, pat, eq):
+                for [e, a] in s[:-1]:
+                    if begins(e, pat, eq):
+                        cell = caddr(e)
+                        yield cell
+                        # if caris(cell, v):
+                        #     if setter:
+                        #         return lambda v: operator.setitem(cell, 1, v)
+                        #     return cadr(cell)
 
 def sigerr(msg, s, r, m):
     """
@@ -325,13 +684,9 @@ def sigerr(msg, s, r, m):
     """
     raise ValueError(msg, s, r)
 
-def string_literal(e, c='"'):
-    if e and string(e):
-        if e.startswith(c) and e.endswith(c) and e != c:
-            return t
-
 def id_literal(e):
-    return string_literal(e, "|")
+    if string_literal(e, "|") or caris(e, "%literal"):
+        return t
 
 def literal(e):
     """
@@ -349,13 +704,21 @@ def literal(e):
         return t
     elif number(e):
         return t
-    elif pair(e):
-        return nil
-    elif callable(e):
+    elif numeric_literal(e):
         return t
     elif string_literal(e):
         return t
     elif id_literal(e):
+        return t
+    elif accessor(e):
+        return t
+    elif keyword(e):
+        return t
+    elif sequence(e):
+        if no(e):
+            return t
+        return nil
+    elif callable(e):
         return t
     # else:
     #     return string(e)
@@ -381,12 +744,22 @@ assert not literal(["do", 1])
 """
 vmark = globals().setdefault("vmark", join("%vmark"))
 
-"""
-(def uvar ()
-  (list vmark))
-"""
+class UVar(Seq):
+    def __init__(self, name=unset):
+        name = init(name, lambda: "v")
+        super().__init__(list(vmark, name))
+    def __repr__(self):
+        return "#" + py.str(cadr(self))
+    def __str__(self):
+        return py.str(cadr(self)) + py.str(py.id(self))
+
 def uvar(*info):
-    return list(vmark, *info)
+    """
+    (def uvar ()
+      (list vmark))
+    """
+    # return list(vmark, *info)
+    return UVar(*(info or ["v"]))
 
 """
 (def variable (e)
@@ -408,35 +781,91 @@ assert not variable(1)
 assert not variable(lambda: 42)
 assert not variable(["do"])
 
+def grab(x, *ks, error=True, setter=nil):
+    self = x
+    for k in (ks[:-1] if setter else ks):
+        if accessor(k):
+            it = accessor_name(k)
+            if error:
+                self = getattr(self, it)
+            else:
+                self = getattr(self, it, unset)
+        elif number(k) or isinstance(k, py.slice):
+            if error:
+                self = operator.getitem(self, k)
+            else:
+                try:
+                    self = operator.getitem(self, k)
+                except IndexError:
+                    self = unset
+        if unset(self):
+            break
+    if unset(self) and error:
+        raise KeyError(cons("grab", x, ks))
+    if setter:
+        lambda v: xset(self, ks[-1], v)
+    return self
+
+def xset(kvs, k, v):
+    if accessor(k):
+        it = accessor_name(k)
+        if unset(v):
+            try:
+                delattr(kvs, it)
+            except AttributeError:
+                pass
+        else:
+            setattr(kvs, it, v)
+    else:
+        if unset(v):
+            try:
+                del kvs[k]
+            except LookupError:
+                pass
+        else:
+            kvs[k] = v
+
 @dispatch
-def get(kvs, k, test=equal):
-    raise NotImplementedError("get", kvs, k, test)
+def get(kvs, k, test=equal, setter=nil):
+    return grab(kvs, k, setter=setter)
 
 @get.register(type(None))
-def get_nil(kvs: None, k, test=equal):
-    pass
+def get_nil(kvs: None, k, test=equal, setter=nil):
+    return unset
 
 @get.register(std.Mapping)
-def get_Mapping(kvs: Mapping, k, test=equal):
+def get_Mapping(kvs: Mapping, k, test=eq, setter=nil):
+    if accessor(k):
+        return grab(kvs, k, setter=setter)
     if test is eq:
         try:
-            it = k in kvs
+            v = kvs[k]
+            if setter:
+                return lambda v: xset(kvs, k, v)
+            else:
+                return v
+        except KeyError:
+            return unset
         except TypeError:
             # unhashable k
             pass
-        else:
-            if it:
-                return kvs, kvs[k]
     for key in kvs:
         if test(key, k):
-            return kvs, kvs[key]
+            if setter:
+                return lambda v: xset(kvs, key, v)
+            else:
+                return kvs[key]
+    return unset
 
 @get.register(py.tuple)
 @get.register(py.list)
-def get_seq(ls: Sequence[std.Mapping], k, test=equal):
+def get_seq(ls: Sequence[std.Mapping], k, test=equal, setter=nil):
+    if accessor(k) or number(k) or isinstance(k, py.slice):
+        return grab(ls, k, setter=setter)
     for l in ls:
-        if it := get(l, k, test):
+        if not unset(it := get(l, k, test, setter=setter)):
             return it
+    return unset
 
 """
 (set smark (join))
@@ -471,7 +900,8 @@ def evmark(e, a, s, r, m):
     if eq(it, "fut"):
         return cadr(e)(s, r, m)
     if eq(it, "bind"):
-        return mev(s, r, m)
+        assert begins(s[-1][0], [smark, "bind", nil])
+        return mev(s[:-1], r, m)
     return sigerr("unknown-mark", s, r, m)
 
 """
@@ -487,7 +917,6 @@ forms = globals().setdefault("forms", {})
 
 forms[smark] = evmark
 
-@fut(nil)
 def discard(s, r, m):
     return mev(s, cdr(r), m)
 
@@ -498,19 +927,55 @@ def do(es, a, s, r, m):
         return mev(cons(list(e, a), s), r, m)
     else:
         return mev(cons(list(e, a),
-                        discard,
+                        fut(a, e)(discard),
                         list(cons("do", es), a),
                         s),
                    r,
                    m)
 
-@form("quote")
-def quote(es, a, s, r, m):
+def quoted(x):
+    if pair(x):
+        return list("list" if proper(x) else "cons", *map(quoted, mkproper(x)))
+    # elif eq(x, "t"):
+    #     return t
+    # elif eq(x, "nil"):
+    #     return nil
+    # elif eq(x, "True"):
+    #     return True
+    # elif eq(x, "False"):
+    #     return False
+    # elif eq(x, "unset"):
+    #     return unset
+    else:
+        # if literal(x):
+        #     if not string(x):
+        #         return x
+        if numeric_literal(x):
+            try:
+                return ast.literal_eval(x)
+            except ValueError:
+                pass
+        elif literal(x) and not string_literal(x) and not id_literal(x):
+            return x
+    return list("%quote", x)
+
+@form("%quote")
+def quote2(es, a, s, r, m):
     """
     (form quote ((e) a s r m)
       (mev s (cons e r) m))
     """
-    return mev(s, cons(car(es), r), m)
+    e = car(es)
+    # print("quoting", e)
+    e = quoted(e)
+    # print("quoted", e)
+    # return mev(s, cons(e, r), m)
+    return mev(cons(list(e, a), s), r, m)
+
+@form("quote")
+def quote1(es, a, s, r, m):
+    e = car(es)
+    return mev(s, cons(e, r), m)
 
 def if_(cond, then, else_):
     return then if cond else else_
@@ -587,7 +1052,7 @@ def dyn(es, a, s, r, m):
     e2 = cons("do", body)
     if variable(v):
         @fut(a, cons("dyn", es))
-        def let(s, r, m):
+        def dyn(s, r, m):
             return dyn2(v, e2, a, s, r, m)
         return mev(cons(list(e1, a),
                         dyn,
@@ -607,10 +1072,13 @@ def dyn2(v, e2, a, s, r, m):
            (cdr r)
            m))
     """
-    return mev(cons(list(e2, a),
-                    list(list(smark, "bind", cons(v, car(r))),
-                         a),
-                    s),
+    cell = {v: car(r)}
+    return mev(snoc(cons(list(e2, a),
+                         # list(list(smark, "bind", list(v, car(r))),
+                         list(list(smark, "bind", cell),
+                              a),
+                         s),
+                    list(list(smark, "bind", nil), a)),
                cdr(r),
                m)
 
@@ -631,7 +1099,8 @@ def let1(es, a, s, r, m):
         return sigerr(list("cannot-let", v, e1), s, r, m)
 
 def let2(v, e2, a, s, r, m):
-    env = cons({v: car(r)}, a)
+    cell = {v: car(r)}
+    env = cons(cell, a)
     return mev(cons(list(e2, env),
                     s),
                cdr(r),
@@ -717,27 +1186,52 @@ def evcall2(es, a, s, r, m):
                m)))
     """
     op, r = car(r), cdr(r)
+    if begins(op, ("lit", "mac")):
+        kws = {}
+        args, rest = snap(es, rev(es), kws)
+        print("applym", op, args, kws)
+        return applym(op, args, kws, a, s, r, m)
 
     @fut(a, cons(op, es))
     def applying(s, r, m):
-        args, r2 = snap(es, r)
-        return applyf(op, rev(args), a, s, r2, m)
+        kws = {}
+        args, r2 = snap(es, r, kws)
+        # args = rev(args)
+        return applyf(op, args, kws, a, s, r2, m)
 
-    return mev(append(map(lambda x: list(x, a), es or []),
+    return mev(append(map(lambda x: list(x, a), es or ()),
                       cons(applying, s)),
                r,
                m)
 
-def snap(es, r):
+def snap(es, r, kws=unset):
     """
     (def snap (xs ys (o acc))
       (if (no xs)
           (list acc ys)
           (snap (cdr xs) (cdr ys) (snoc acc (car ys)))))
     """
+    kws = init(kws, lambda: {})
     n = len(es or [])
     r = r or []
-    return r[:n], r[n:]
+    lh, rh = r[:n], r[n:]
+    lh = rev(lh)
+    args = []
+    i = 0
+    while i < n:
+        if keyword(es[i]):
+            k = keyword_name(es[i])
+            v = grab(lh, i + 1)
+            kws[k] = v
+            i += 2
+        else:
+            args.append(lh[i])
+            i += 1
+    # while len(es) >= 2 and keyword(es[-2]):
+    #     kws[keyword_name(es[-2])] = lh[-1]
+    #     lh = lh[:-2]
+    #     es = es[:-2]
+    return args, rh
 
 def rev(es):
     """
@@ -749,7 +1243,7 @@ def rev(es):
     return es[::-1] if es else nil
 
 
-def applym(mac, args, a, s, r, m):
+def applym(mac, args, kws, a, s, r, m):
     """
     (def applym (mac args a s r m)
       (applyf (caddr mac)
@@ -771,13 +1265,14 @@ def applym(mac, args, a, s, r, m):
 
     return applyf(caddr(mac),
                   args,
+                  kws,
                   a,
                   cons(expanding,
                        s),
                   r,
                   m)
 
-def applyf(f, args, a, s, r, m):
+def applyf(f, args, kws, a, s, r, m):
     """
     (def applyf (f args a s r m)
       (if (= f apply)    (applyf (car args) (reduce join (cdr args)) a s r m)
@@ -787,13 +1282,13 @@ def applyf(f, args, a, s, r, m):
                          (sigerr 'cannot-apply s r m)))
     """
     if callable(f):
-        e = f(*args)
+        e = apply(f, args, kws)
         return mev(s, cons(e, r), m)
     if caris(f, "lit"):
-        return applylit(f, args, a, s, r, m)
-    return sigerr(list("cannot-apply", cons(f, args)), s, r, m)
+        return applylit(f, args, kws, a, s, r, m)
+    return sigerr(list("cannot-apply", cons(f, args, kws)), s, r, m)
 
-def applylit(f, args, a, s, r, m):
+def applylit(f, args, kws, a, s, r, m):
     """
     (def applylit (f args a s r m)
       (aif (and (inwhere s) (find [(car _) f] locfns))
@@ -818,8 +1313,8 @@ def applylit(f, args, a, s, r, m):
     lit = cdr(f)
     tag, rest = car(lit), cdr(lit)
     if eq(tag, "mac"):
-        # return applym(f, [list("quote", x) for x in args or ()], a, s, r, m)
-        return applym(f, args or (), a, s, r, m)
+        return applym(f, [list("quote", x) for x in args or ()], kws, a, s, r, m)
+        # return applym(f, args or (), a, s, r, m)
     if eq(tag, "cont"):
         s2, r2 = car(rest), cadr(rest)
         return applycont(s2, r2, args, s, r, m)
@@ -857,6 +1352,133 @@ def protected(x):
         if begins(car(x), list(smark, tag), eq):
             return t
 
+
+import code
+import codeop
+
+class BelCommandCompiler(codeop.CommandCompiler):
+    def __call__(self, source, filename="<input>", symbol="single"):
+        form, pos = reader.read_from_string(source, more=(more := object()), mode="bel")
+        if form is more:
+            return None
+        return form
+
+class BelConsole(code.InteractiveConsole):
+    def __init__(self, locals=unset, filename="<console>"):
+        super().__init__(locals={}, filename=filename)
+        self.locals = locals
+        self.compile = BelCommandCompiler()
+        self.that = nil
+        self.thatexpr = nil
+
+    def exec(self, form, locals=unset):
+        if locals is unset:
+            locals = self.locals
+        # print(json.dumps(form))
+        self.thatexpr = form
+        self.that = bel(self.thatexpr, unset, locals)
+        if self.that is not None:
+            print(repr(self.that))
+
+    def runcode(self, code):
+        """Execute a code object.
+
+        When an exception occurs, self.showtraceback() is called to
+        display a traceback.  All exceptions are caught except
+        SystemExit, which is reraised.
+
+        A note about KeyboardInterrupt: this exception may occur
+        elsewhere in this code, and may not always be caught.  The
+        caller should be prepared to deal with it.
+
+        """
+        import yel
+        import yel.constants
+        reload(yel.constants)
+        reload(yel.util)
+        reload(reader)
+        reload(compiler)
+        reload(yel.bel)
+        reload(M)
+        try:
+            self.exec(code, self.locals)
+        except SystemExit:
+            raise
+        except:
+            self.showtraceback()
+
+@contextlib.contextmanager
+def letattr(obj, key, val):
+    empty = object()
+    prev = getattr(obj, key, empty)
+    setattr(obj, key, val)
+    try:
+        yield
+    finally:
+        if prev is empty:
+            delattr(obj, key)
+        else:
+            setattr(obj, key, prev)
+
+def interact(*, banner=None, readfunc=None, local=None, exitmsg=None):
+    """Closely emulate the interactive Python interpreter.
+
+    This is a backwards compatible interface to the InteractiveConsole
+    class.  When readfunc is not specified, it attempts to import the
+    readline module to enable GNU readline if it is available.
+
+    Arguments (all optional, all default to None):
+
+    banner -- passed to InteractiveConsole.interact()
+    readfunc -- if not None, replaces InteractiveConsole.raw_input()
+    local -- passed to InteractiveInterpreter.__init__()
+    exitmsg -- passed to InteractiveConsole.interact()
+
+    """
+    console = BelConsole(local)
+    if readfunc is not None:
+        console.raw_input = readfunc
+    else:
+        try:
+            import readline
+        except ImportError:
+            pass
+    iterm2_prompt_mark = "\u001b]133;A\u0007\n"
+    with letattr(sys, 'ps1', iterm2_prompt_mark + '> '):
+        with letattr(sys, 'ps2', '  '):
+            console.interact(banner, exitmsg)
+
+
+def dbg():
+    import pdb
+    pdb.pm()
+
+
+def read_file(filename):
+    with open(filename, "r") as f:
+        return f.read()
+
+def write_file(filename, data):
+    with util.open_atomic(filename, "w") as f:
+        f.write(data)
+
+def read_from_file(filename, *, mode="bel"):
+    code = read_file(filename)
+    body = reader.read_all(reader.stream(code, mode=mode))
+    return body
+
+def compile_file(filename):
+    body = read_from_file(filename)
+    return mapcat(compiler.compile_statement, body)
+
+def load(filename):
+    filepath = os.path.realpath(filename)
+    base, ext = os.path.splitext(filepath)
+    assert ext == ".l"
+    fileout = base + ".py"
+    print(fileout)
+    compiled = compile_file(filepath)
+    write_file(fileout, compiled)
 
 
 # import yel.bel as b; from importlib import reload; reload(b)
